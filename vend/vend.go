@@ -14,9 +14,11 @@ limitations under the License.
 package vend
 
 import (
+	"bufio"
 	"bytes"
 	"encoding/json"
 	"fmt"
+	"io"
 	"io/ioutil"
 	"os"
 	"os/exec"
@@ -178,14 +180,51 @@ func Save(dir, cfgPath string, addons, rgits, rhgs []string, ignored map[string]
 	return nil
 }
 
+func highlightBytePosition(f io.Reader, pos int64) (line, col int, highlight string) {
+	line = 1
+	br := bufio.NewReader(f)
+	lastLine := ""
+	thisLine := new(bytes.Buffer)
+	for n := int64(0); n < pos; n++ {
+		b, err := br.ReadByte()
+		if err != nil {
+			break
+		}
+		if b == '\n' {
+			lastLine = thisLine.String()
+			thisLine.Reset()
+			line++
+			col = 1
+		} else {
+			col++
+			thisLine.WriteByte(b)
+		}
+	}
+	if line > 1 {
+		highlight += fmt.Sprintf("%5d: %s\n", line-1, lastLine)
+	}
+	highlight += fmt.Sprintf("%5d: %s\n", line, thisLine.String())
+	highlight += fmt.Sprintf("%s^\n", strings.Repeat(" ", col+5))
+	return
+}
+
 func Restore(dir, cfgPath string) error {
 	in, err := os.Open(cfgPath)
 	if err != nil {
 		return err
 	}
 	var cfg Config
-	if err := json.NewDecoder(in).Decode(&cfg); err != nil {
-		return err
+	if err := json.NewDecoder(in).Decode(&cfg); err != nil && err != io.EOF {
+		extra := ""
+		if serr, ok := err.(*json.SyntaxError); ok {
+			if _, serr := in.Seek(0, os.SEEK_SET); serr != nil {
+				return fmt.Errorf("seek error: %v", serr)
+			}
+			line, col, highlight := highlightBytePosition(in, serr.Offset)
+			extra = fmt.Sprintf(":\nError at line %d, column %d (file offset %d):\n%s",
+				line, col, serr.Offset, highlight)
+		}
+		return fmt.Errorf("error parsing JSON object in config file %s%s\n%v", in.Name(), extra, err)
 	}
 
 	wg := sync.WaitGroup{}
